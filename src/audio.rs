@@ -191,6 +191,10 @@ pub struct Deck {
 }
 
 impl Deck {
+    pub fn duration(&self) -> Option<Duration> {
+        self.duration
+    }
+
     pub fn remaining(&self) -> Option<Duration> {
         self.duration
             .map(|duration| duration.saturating_sub(self.player.get_pos()))

@@ -309,8 +309,10 @@ pub fn mp3_encoder() -> Command {
 
 pub struct Broadcast {
     child: Child,
+    started_at: std::time::Instant,
     reports: Receiver<Result<(), String>>,
     ready: bool,
+    waiting_for_shoutcast: bool,
     tls: bool,
     pub name: String,
     metadata: MetadataUpdates,
@@ -377,8 +379,10 @@ impl Broadcast {
         Ok((
             Self {
                 child,
+                started_at: std::time::Instant::now(),
                 reports,
                 ready,
+                waiting_for_shoutcast: settings.protocol == Protocol::Shoutcast,
                 tls: settings.tls,
                 name: settings.label().to_owned(),
                 metadata: MetadataUpdates::new(settings.clone()),
@@ -391,6 +395,7 @@ impl Broadcast {
         for result in self.reports.try_iter() {
             result?;
             self.ready = true;
+            self.started_at = std::time::Instant::now();
         }
         match self.child.try_wait() {
             Ok(None) => Ok(()),
@@ -407,6 +412,11 @@ impl Broadcast {
 
     pub fn metadata_error(&self) -> Option<&str> {
         self.metadata.error.as_deref()
+    }
+
+    pub fn uptime(&self) -> Option<Duration> {
+        // Icecast is managed by FFmpeg. Its connection handshake is not reported here.
+        (!self.waiting_for_shoutcast || self.ready).then(|| self.started_at.elapsed())
     }
 
     pub fn status(&self) -> &str {

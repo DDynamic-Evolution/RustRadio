@@ -10,6 +10,7 @@ mod playlist;
 mod recording;
 mod rotation;
 mod schedule;
+mod waveform;
 
 use std::{collections::VecDeque, path::PathBuf, time::Duration};
 
@@ -53,6 +54,8 @@ struct Radio {
     selected: Option<usize>,
     current: Option<usize>,
     deck: Option<Deck>,
+    waveform: Option<waveform::Waveform>,
+    waveform_path: Option<PathBuf>,
     jingles: Vec<PathBuf>,
     jingle: Option<(usize, Deck)>,
     audio: Option<Audio>,
@@ -110,6 +113,8 @@ impl Radio {
             mic_gain: saved::<f32>(storage, "mic_gain", 1.0).clamp(0.0, 1.0),
             stream_gain: saved::<f32>(storage, "stream_gain", 1.0).clamp(0.0, 1.0),
             deck: None,
+            waveform: None,
+            waveform_path: None,
             jingles: saved(storage, "jingles", Vec::new()),
             jingle: None,
             audio: None,
@@ -380,7 +385,31 @@ impl Radio {
         }
     }
 
-    fn playback_display(&self, ui: &mut egui::Ui) {
+    fn audio_display(&mut self, ui: &mut egui::Ui) {
+        if ui.available_width() >= 740.0 {
+            let meter_width = 410.0;
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(meter_width);
+                    self.level_controls(ui);
+                });
+                ui.vertical(|ui| {
+                    self.playback_display(ui);
+                });
+            });
+        } else {
+            self.level_controls(ui);
+            self.playback_display(ui);
+        }
+    }
+
+    fn level_controls(&mut self, ui: &mut egui::Ui) {
+        self.microphone_level_ui(ui);
+        self.local_level_ui(ui);
+        self.stream_level_ui(ui);
+    }
+
+    fn playback_display(&mut self, ui: &mut egui::Ui) {
         let path = self
             .scheduled_track
             .as_ref()
@@ -392,62 +421,134 @@ impl Radio {
                 } else {
                     ("PLAYING", egui::Color32::from_rgb(152, 255, 174))
                 };
-                (
-                    status,
-                    track_name(path),
-                    deck.player.get_pos().as_secs(),
-                    accent,
-                )
+                (status, track_name(path), deck.player.get_pos(), accent)
             }
             _ => (
                 "STOPPED",
                 "No track playing".into(),
-                0,
+                Duration::ZERO,
                 egui::Color32::from_rgb(164, 190, 172),
             ),
         };
 
+        if self.waveform_path.as_ref() != path {
+            self.waveform_path = path.cloned();
+            self.waveform = path
+                .cloned()
+                .map(|path| waveform::Waveform::start(path, ui.ctx().clone()));
+        }
+        if let Some(waveform) = &mut self.waveform {
+            waveform.poll();
+        }
+        let analysis = self
+            .waveform
+            .as_ref()
+            .and_then(|waveform| waveform.analysis.as_ref());
+        let duration = self
+            .deck
+            .as_ref()
+            .and_then(Deck::duration)
+            .or_else(|| analysis.map(|wave| wave.duration));
+        let elapsed_text = display_time(elapsed.as_secs());
+        let timing = match duration {
+            Some(total) => format!("{elapsed_text} / {}", display_time(total.as_secs())),
+            None => elapsed_text,
+        };
+
         ui.add_space(4.0);
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(10, 26, 18))
-            .stroke(egui::Stroke::new(
-                1.0_f32,
-                egui::Color32::from_rgb(69, 105, 82),
-            ))
-            .corner_radius(5)
-            .inner_margin(egui::Margin::symmetric(14, 8))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{:02}:{:02}", elapsed / 60, elapsed % 60))
-                            .monospace()
-                            .size(24.0)
-                            .strong()
-                            .color(accent),
-                    );
-                    ui.add_space(10.0);
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        ui.label(
-                            egui::RichText::new(status)
-                                .monospace()
-                                .size(11.0)
-                                .strong()
-                                .color(accent),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&title)
-                                    .monospace()
-                                    .size(16.0)
-                                    .color(egui::Color32::from_rgb(218, 245, 225)),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(title);
-                    });
-                });
+        lcd_frame().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(status)
+                        .monospace()
+                        .size(11.0)
+                        .strong()
+                        .color(accent),
+                );
+                ui.label(
+                    egui::RichText::new(timing)
+                        .monospace()
+                        .size(22.0)
+                        .strong()
+                        .color(accent),
+                );
             });
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&title)
+                        .monospace()
+                        .size(16.0)
+                        .color(egui::Color32::from_rgb(218, 245, 225)),
+                )
+                .truncate(),
+            )
+            .on_hover_text(title);
+            if let Some(total) = duration.filter(|total| !total.is_zero()) {
+                let progress = (elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0);
+                if let Some(position) = waveform::display(ui, analysis, progress, accent)
+                    && let Some(deck) = &self.deck
+                {
+                    match deck.player.try_seek(total.mul_f32(position)) {
+                        Ok(()) => {
+                            self.fade = None;
+                            self.transition_attempted = false;
+                        }
+                        Err(error) => self.error = Some(format!("Could not seek: {error}")),
+                    }
+                }
+            } else if self.deck.is_some() {
+                ui.label(
+                    egui::RichText::new("Track duration unavailable")
+                        .monospace()
+                        .small()
+                        .color(accent),
+                );
+            }
+        });
+    }
+
+    fn clock_displays(&self, ui: &mut egui::Ui) {
+        let clock = chrono::Local::now().format("%H:%M:%S").to_string();
+        let (stream, hint) = match &self.broadcast {
+            Some(broadcast) => match broadcast.uptime() {
+                Some(duration) => (
+                    format!(
+                        "{:02}:{}",
+                        duration.as_secs() / 3600,
+                        display_time(duration.as_secs() % 3600)
+                    ),
+                    "Stream session duration",
+                ),
+                None => ("CONNECTING".into(), "Waiting for the SHOUTcast server"),
+            },
+            None => ("OFFLINE".into(), "No active stream session"),
+        };
+        ui.horizontal_wrapped(|ui| {
+            for (label, value, hint) in [
+                ("SYSTEM TIME", clock, "Local system time"),
+                ("STREAM TIME", stream, hint),
+            ] {
+                lcd_frame().show(ui, |ui| {
+                    ui.set_min_width(134.0);
+                    let color = egui::Color32::from_rgb(152, 255, 174);
+                    ui.label(
+                        egui::RichText::new(label)
+                            .monospace()
+                            .size(11.0)
+                            .color(color),
+                    );
+                    ui.label(
+                        egui::RichText::new(value)
+                            .monospace()
+                            .size(22.0)
+                            .strong()
+                            .color(color),
+                    )
+                    .on_hover_text(hint);
+                });
+            }
+        });
     }
 
     fn local_level_ui(&mut self, ui: &mut egui::Ui) {
@@ -1017,6 +1118,8 @@ impl eframe::App for Radio {
     }
 
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        let subsecond = chrono::Local::now().timestamp_subsec_millis();
+        context.request_repaint_after(Duration::from_millis(u64::from(1000 - subsecond)));
         self.tick();
         if self
             .recording
@@ -1196,11 +1299,8 @@ impl eframe::App for Radio {
                 }
             });
 
-            self.microphone_level_ui(ui);
-            self.local_level_ui(ui);
-            self.stream_level_ui(ui);
-
-            self.playback_display(ui);
+            self.audio_display(ui);
+            self.clock_displays(ui);
         });
 
         self.schedule_ui(context);
@@ -1361,6 +1461,21 @@ fn device_picker(
     choice
 }
 
+fn lcd_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(10, 26, 18))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgb(69, 105, 82),
+        ))
+        .corner_radius(5)
+        .inner_margin(egui::Margin::symmetric(14, 8))
+}
+
+fn display_time(seconds: u64) -> String {
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
 fn peak_meter(ui: &mut egui::Ui, name: &str, peak: f32) {
     let db = 20.0 * peak.log10();
     let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
@@ -1445,6 +1560,28 @@ mod profile_tests {
         radio.move_track(0, 2);
         assert_eq!(radio.playlist, ["c", "d", "b", "a"].map(PathBuf::from));
         assert_eq!(radio.current, Some(2));
+    }
+
+    #[test]
+    fn lcd_header_leaves_room_for_the_three_columns() {
+        let context = egui::Context::default();
+        let mut radio = Radio::new(None);
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(850.0, 540.0),
+                )),
+                ..Default::default()
+            },
+            |context| {
+                egui::TopBottomPanel::top("lcd_test").show(context, |ui| {
+                    radio.audio_display(ui);
+                    radio.clock_displays(ui);
+                });
+                assert!(context.available_rect().height() > 350.0);
+            },
+        );
     }
 
     fn ron_string(profile: &broadcast::Settings) -> String {

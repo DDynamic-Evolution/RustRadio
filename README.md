@@ -4,7 +4,7 @@ RustRadio is a desktop radio automation and streaming app written in Rust for Wi
 
 ## Download for Windows x64
 
-1. Download the [portable ZIP](https://github.com/DDynamic-Evolution/RustRadio/releases/download/v0.2.1/RustRadio-v0.2.1-windows-x64-portable.zip) from [release v0.2.1](https://github.com/DDynamic-Evolution/RustRadio/releases/tag/v0.2.1).
+1. Download the [portable ZIP](https://github.com/DDynamic-Evolution/RustRadio/releases/download/v0.2.2/RustRadio-v0.2.2-windows-x64-portable.zip) from [release v0.2.2](https://github.com/DDynamic-Evolution/RustRadio/releases/tag/v0.2.2).
 2. Extract the entire archive.
 3. Double-click **Start RustRadio.cmd**. Keep the `ffmpeg` folder next to the launcher.
 
@@ -32,6 +32,8 @@ cargo build --release --locked
 The release executable is `target/release/rust-radio.exe` on Windows and `target/release/rust-radio` on Linux. To stream or record with a source build, install FFmpeg with `libmp3lame` and make it available in `PATH`. On Ubuntu and Debian, install the `ffmpeg` package.
 
 ## Playback and scheduling
+
+The playback LCD shows the current track and its waveform. Click the waveform to seek. Separate LCDs show local system time and the current stream session duration.
 
 - **Playlist** lets you add, remove, and reorder tracks. Double-click a track to play it. **Save playlist** exports M3U8. **Load playlist** opens M3U8 and UTF-8 M3U files, stops playback, and replaces the current list. Relative audio paths are resolved from the playlist's folder.
 - **Shuffle** plays tracks in random order, avoiding immediate repeats between passes when multiple tracks are available. With Shuffle off, playback follows playlist order and stops at the end.
