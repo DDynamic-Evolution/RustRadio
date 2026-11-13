@@ -66,7 +66,8 @@ struct Radio {
     rotation: Rotation,
     events: Vec<Event>,
     pending_events: VecDeque<(PathBuf, Action)>,
-    scheduled_clip: Option<Deck>,
+    scheduled_clip: Option<(PathBuf, Deck)>,
+    schedule_log: VecDeque<String>,
     pending_clips: VecDeque<PathBuf>,
     scheduled_track: Option<PathBuf>,
     show_settings: bool,
@@ -82,6 +83,8 @@ struct Radio {
     stream_profiles: Vec<broadcast::Settings>,
     selected_stream: usize,
     broadcast: Option<Broadcast>,
+    reconnect: Option<(broadcast::Settings, std::time::Instant, String)>,
+    active_profile: Option<broadcast::Settings>,
     recording_dir: Option<PathBuf>,
     recording: Option<recording::Recording>,
     last_recording: Option<PathBuf>,
@@ -126,6 +129,7 @@ impl Radio {
             events: saved(storage, "events", Vec::new()),
             pending_events: VecDeque::new(),
             scheduled_clip: None,
+            schedule_log: saved(storage, "schedule_log", VecDeque::new()),
             pending_clips: VecDeque::new(),
             scheduled_track: None,
             show_settings: false,
@@ -152,6 +156,8 @@ impl Radio {
             stream_profiles,
             selected_stream,
             broadcast: None,
+            reconnect: None,
+            active_profile: None,
             recording_dir: saved(storage, "recording_dir", None),
             recording: None,
             last_recording: None,
@@ -205,8 +211,12 @@ impl Radio {
         self.deck = None;
         self.fade = None;
         self.current = None;
-        self.scheduled_track = None;
-        self.pending_events.clear();
+        if let Some(path) = self.scheduled_track.take() {
+            self.log_schedule(&path, "Stopped");
+        }
+        while let Some((path, _)) = self.pending_events.pop_front() {
+            self.log_schedule(&path, "Cancelled");
+        }
     }
 
     fn set_paused(&self, paused: bool) {
@@ -250,6 +260,15 @@ impl Radio {
         }
     }
 
+    fn log_schedule(&mut self, path: &std::path::Path, status: &str) {
+        self.schedule_log.push_front(format!(
+            "{} · {} · {status}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            track_name(path)
+        ));
+        self.schedule_log.truncate(100);
+    }
+
     fn tick(&mut self) {
         let now = chrono::Local::now();
         for event in &mut self.events {
@@ -264,9 +283,10 @@ impl Radio {
         if self
             .scheduled_clip
             .as_ref()
-            .is_some_and(|clip| clip.player.empty())
+            .is_some_and(|(_, clip)| clip.player.empty())
+            && let Some((path, _)) = self.scheduled_clip.take()
         {
-            self.scheduled_clip = None;
+            self.log_schedule(&path, "Played");
         }
         while self.scheduled_clip.is_none() {
             let Some(path) = self.pending_clips.pop_front() else {
@@ -274,8 +294,14 @@ impl Radio {
             };
             let gain = 1.0;
             match self.audio().and_then(|audio| audio.deck(&path, gain)) {
-                Ok(clip) => self.scheduled_clip = Some(clip),
-                Err(error) => self.error = Some(error),
+                Ok(clip) => {
+                    self.log_schedule(&path, "Started");
+                    self.scheduled_clip = Some((path, clip));
+                }
+                Err(error) => {
+                    self.log_schedule(&path, &format!("Failed: {error}"));
+                    self.error = Some(error);
+                }
             }
         }
         let music_volume = if self.scheduled_clip.is_some() {
@@ -285,6 +311,9 @@ impl Radio {
         };
 
         let ended = self.deck.as_ref().is_none_or(|deck| deck.player.empty());
+        if ended && let Some(path) = self.scheduled_track.take() {
+            self.log_schedule(&path, "Played");
+        }
         if ended || self.scheduled_track.is_none() {
             while let Some(index) = self
                 .pending_events
@@ -294,13 +323,17 @@ impl Radio {
                 let (path, _) = self.pending_events.remove(index).expect("queued event");
                 match self.start_path(&path, Duration::ZERO) {
                     Ok(()) => {
+                        self.log_schedule(&path, "Started");
                         self.scheduled_track = Some(path);
                         if let Some(deck) = &self.deck {
                             deck.player.set_volume(music_volume);
                         }
                         return;
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {
+                        self.log_schedule(&path, &format!("Failed: {error}"));
+                        self.error = Some(error);
+                    }
                 }
             }
         }
@@ -410,6 +443,16 @@ impl Radio {
     }
 
     fn playback_display(&mut self, ui: &mut egui::Ui) {
+        let next_up = self
+            .pending_events
+            .iter()
+            .find(|(_, action)| *action == Action::SongOnTime && self.scheduled_track.is_none())
+            .or_else(|| self.pending_events.front())
+            .map(|(path, _)| track_name(path))
+            .or_else(|| {
+                let index = self.candidates().first().copied()?;
+                self.playlist.get(index).map(|path| track_name(path))
+            });
         let path = self
             .scheduled_track
             .as_ref()
@@ -505,6 +548,29 @@ impl Radio {
                         .color(accent),
                 );
             }
+            if let Some(total) = duration {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "REMAINING  {}",
+                        display_time(total.saturating_sub(elapsed).as_secs())
+                    ))
+                    .monospace()
+                    .small()
+                    .color(accent),
+                );
+            }
+            if let Some(title) = next_up {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("NEXT  {title}"))
+                            .monospace()
+                            .small()
+                            .color(accent),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(title);
+            }
         });
     }
 
@@ -520,8 +586,11 @@ impl Radio {
                     ),
                     "Stream session duration",
                 ),
-                None => ("CONNECTING".into(), "Waiting for the SHOUTcast server"),
+                None => ("CONNECTING".into(), "Waiting for the stream server"),
             },
+            None if self.reconnect.is_some() => {
+                ("RECONNECTING".into(), "Retrying the stream connection")
+            }
             None => ("OFFLINE".into(), "No active stream session"),
         };
         ui.horizontal_wrapped(|ui| {
@@ -594,6 +663,11 @@ impl Radio {
 
             let peak = self.audio.as_ref().map_or(0.0, Audio::stream_peak);
             peak_meter(ui, "Stream peak", peak);
+            let reduction = self.audio.as_ref().map_or(0.0, Audio::limiter_reduction);
+            if reduction > 0.001 {
+                let db = -20.0 * (1.0 - reduction).log10();
+                ui.label(format!("Limiter −{db:.1} dB"));
+            }
         });
     }
 
@@ -829,9 +903,34 @@ impl Radio {
                         self.pending_events.len() + self.pending_clips.len()
                     ));
                 }
-                if self.scheduled_clip.is_some() && ui.button("Stop scheduled clip").clicked() {
-                    self.scheduled_clip = None;
+                if self.scheduled_clip.is_some()
+                    && ui.button("Stop scheduled clip").clicked()
+                    && let Some((path, _)) = self.scheduled_clip.take()
+                {
+                    self.log_schedule(&path, "Stopped");
                 }
+                ui.collapsing("Queue and history", |ui| {
+                    for (path, action) in &self.pending_events {
+                        let status = if *action == Action::SongAfterTrack {
+                            "Waiting for track end"
+                        } else {
+                            "Queued song"
+                        };
+                        ui.label(format!("{status} · {}", track_name(path)));
+                    }
+                    for path in &self.pending_clips {
+                        ui.label(format!("Queued clip · {}", track_name(path)));
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("schedule_log")
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            for line in &self.schedule_log {
+                                ui.label(line);
+                            }
+                        });
+                });
+                ui.label("Same time: clips can overlap songs. On-time songs take priority over songs waiting for the track to end.");
                 let mut remove = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (index, event) in self.events.iter_mut().enumerate() {
@@ -859,6 +958,8 @@ impl Radio {
             audio.set_feed(None);
         }
         self.broadcast = None;
+        self.reconnect = None;
+        self.active_profile = None;
     }
 
     fn broadcast_ui(&mut self, ui: &mut egui::Ui) {
@@ -909,7 +1010,10 @@ impl Radio {
         ui.label("Profiles are saved automatically. Source passwords are kept for this session.");
 
         if ui
-            .add_enabled(self.broadcast.is_none(), egui::Button::new("Connect"))
+            .add_enabled(
+                self.broadcast.is_none() && self.reconnect.is_none(),
+                egui::Button::new("Connect"),
+            )
             .clicked()
         {
             self.connect_stream();
@@ -917,16 +1021,47 @@ impl Radio {
     }
 
     fn connect_stream(&mut self) {
-        let result = self
-            .audio()
-            .map(|_| ())
-            .and_then(|_| Broadcast::start(&self.stream_profiles[self.selected_stream]));
-        match result {
-            Ok((broadcast, sender)) => {
-                self.audio.as_ref().unwrap().set_feed(Some(sender));
-                self.broadcast = Some(broadcast);
+        let profile = self.stream_profiles[self.selected_stream].clone();
+        if let Err(error) = self.start_stream(&profile) {
+            self.error = Some(error);
+        }
+    }
+
+    fn start_stream(&mut self, profile: &broadcast::Settings) -> Result<(), String> {
+        let audio = self.audio()?;
+        let (broadcast, sender) = Broadcast::start(profile)?;
+        audio.set_feed(Some(sender));
+        self.broadcast = Some(broadcast);
+        self.active_profile = Some(profile.clone());
+        Ok(())
+    }
+
+    fn update_stream_connection(&mut self) {
+        if let Some(broadcast) = &mut self.broadcast
+            && let Err(error) = broadcast.poll()
+        {
+            let profile = self.active_profile.take();
+            self.disconnect();
+            if let Some(profile) = profile {
+                self.reconnect = Some((
+                    profile,
+                    std::time::Instant::now() + Duration::from_secs(5),
+                    error,
+                ));
             }
-            Err(error) => self.error = Some(error),
+        }
+        if self
+            .reconnect
+            .as_ref()
+            .is_some_and(|(_, retry, _)| *retry <= std::time::Instant::now())
+            && let Some((profile, _, _)) = self.reconnect.take()
+            && let Err(error) = self.start_stream(&profile)
+        {
+            self.reconnect = Some((
+                profile,
+                std::time::Instant::now() + Duration::from_secs(5),
+                error,
+            ));
         }
     }
 
@@ -1113,6 +1248,7 @@ impl eframe::App for Radio {
         eframe::set_value(storage, "crossfade", &self.fade_seconds);
         eframe::set_value(storage, "rotation", &self.rotating);
         eframe::set_value(storage, "events", &self.events);
+        eframe::set_value(storage, "schedule_log", &self.schedule_log);
         eframe::set_value(storage, "stream_profiles", &self.stream_profiles);
         eframe::set_value(storage, "selected_stream", &self.selected_stream);
     }
@@ -1147,16 +1283,12 @@ impl eframe::App for Radio {
             self.stop_microphone();
             self.error = Some(format!("Microphone: {error}"));
         }
-        if let Some(broadcast) = &mut self.broadcast
-            && let Err(error) = broadcast.poll()
-        {
-            self.disconnect();
-            self.error = Some(error);
-        }
+        self.update_stream_connection();
         if self.deck.is_some() || self.scheduled_clip.is_some() {
             context.request_repaint_after(Duration::from_millis(20));
         } else if !self.events.is_empty()
             || self.broadcast.is_some()
+            || self.reconnect.is_some()
             || self.mic.is_some()
             || self.recording.is_some()
         {
@@ -1270,6 +1402,16 @@ impl eframe::App for Radio {
                         ui.label(error);
                     }
                     if ui.button("Disconnect stream").clicked() {
+                        self.disconnect();
+                    }
+                } else if let Some((profile, retry, error)) = &self.reconnect {
+                    let seconds = retry
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_secs()
+                        + 1;
+                    ui.label(format!("{} · Reconnecting in {seconds}s", profile.label()))
+                        .on_hover_text(error);
+                    if ui.button("Cancel reconnect").clicked() {
                         self.disconnect();
                     }
                 } else {

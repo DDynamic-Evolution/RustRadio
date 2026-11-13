@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3
+
+- Start the stream timer after Icecast begins sending audio or SHOUTcast confirms source login. Retry lost connections every five seconds without stopping local playback or recording.
+- Show pending items and the latest 100 log entries under **Scheduler → Queue and history**.
+- Limit peaks in the broadcast and recording mix and show gain reduction beside the stream meter.
+- Show the remaining track time and the next queued song in the playback LCD, including scheduled songs and shuffle order.
+
 ## 0.2.2
 
 - Added a waveform to the playback LCD. The played portion is highlighted, and clicking the waveform seeks within the track.

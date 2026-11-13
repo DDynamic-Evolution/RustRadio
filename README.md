@@ -4,7 +4,7 @@ RustRadio is a desktop radio automation and streaming app written in Rust for Wi
 
 ## Download for Windows x64
 
-1. Download the [portable ZIP](https://github.com/DDynamic-Evolution/RustRadio/releases/download/v0.2.2/RustRadio-v0.2.2-windows-x64-portable.zip) from [release v0.2.2](https://github.com/DDynamic-Evolution/RustRadio/releases/tag/v0.2.2).
+1. Download the [portable ZIP](https://github.com/DDynamic-Evolution/RustRadio/releases/download/v0.2.3/RustRadio-v0.2.3-windows-x64-portable.zip) from [release v0.2.3](https://github.com/DDynamic-Evolution/RustRadio/releases/tag/v0.2.3).
 2. Extract the entire archive.
 3. Double-click **Start RustRadio.cmd**. Keep the `ffmpeg` folder next to the launcher.
 
@@ -33,13 +33,13 @@ The release executable is `target/release/rust-radio.exe` on Windows and `target
 
 ## Playback and scheduling
 
-The playback LCD shows the current track and its waveform. Click the waveform to seek. Separate LCDs show local system time and the current stream session duration.
+The playback LCD shows the current track and its waveform. Click the waveform to seek. The LCD also shows remaining time and the next queued track. Separate LCDs show local system time and the current stream session duration.
 
 - **Playlist** lets you add, remove, and reorder tracks. Double-click a track to play it. **Save playlist** exports M3U8. **Load playlist** opens M3U8 and UTF-8 M3U files, stops playback, and replaces the current list. Relative audio paths are resolved from the playlist's folder.
 - **Shuffle** plays tracks in random order, avoiding immediate repeats between passes when multiple tracks are available. With Shuffle off, playback follows playlist order and stops at the end.
 - **Crossfade** under **Settings → Automation** blends into the next track over up to 15 seconds when the track duration is known. Short tracks fade over at most their second half.
 - **Jingles → Add clips** stores station IDs, jingles, and sound effects alongside the playlist. Click a clip to play it over the program in both the local output and stream. A new clip replaces the previous one. **Stop clip** stops it independently of the playlist.
-- **Scheduler** accepts audio files, playlist tracks, and jingles. Set a local time and either weekdays or a **One-time date**. **Clip** plays over ducked music. **Song · on time** interrupts the playlist. **Song · after current track** waits for the track to finish. RustRadio must be open during the scheduled minute.
+- **Scheduler** accepts audio files, playlist tracks, and jingles. Set a local time and either weekdays or a **One-time date**. **Clip** plays over ducked music. **Song · on time** interrupts the playlist. **Song · after current track** waits for the track to finish. RustRadio must be open during the scheduled minute. **Queue and history** shows waiting items and the last 100 log entries.
 
 ## Microphone and audio
 
@@ -49,7 +49,7 @@ Use **Settings → Audio** to choose the microphone and playback device. Select 
 
 **Settings → Equalizer** applies five bands from 80 Hz to 12 kHz to the music in both the stream and local output. Each band has a ±12 dB range. EQ settings are saved automatically.
 
-**Local volume** adjusts playback on the selected output device. **Local peak** shows the signal after that control. **Stream volume** controls the final mix for streaming and recording, including the microphone. **Stream peak** measures the signal before encoding and works before connecting to a server.
+**Local volume** adjusts playback on the selected output device. **Local peak** shows the signal after that control. **Stream volume** controls the final mix for streaming and recording, including the microphone. **Stream peak** measures the signal before encoding and works before connecting to a server. A soft limiter protects the stream and recording mix and shows gain reduction next to the peak meter.
 
 ## Streaming
 
@@ -58,7 +58,7 @@ Under **Settings → Streams**, use **New profile** to save named streaming dest
 - **Icecast** requires a server, port, mount point, username, and source password. Enable **TLS** if the server supports it. RustRadio passes the source password to FFmpeg as an argument.
 - **SHOUTcast (ICY)** requires a source port and source password. The source port is often the listener port plus one. SHOUTcast v2 must accept legacy sources. If your provider specifies a stream ID, use its required password format, commonly `password:#streamid`. TLS requires a TLS-enabled source port or proxy. RustRadio validates the certificate and hostname against public root certificates.
 
-Click **Connect** in the main window to start the selected profile. RustRadio sends the stereo program mix as 128 kbit/s MP3. The connection stays open during silence.
+Click **Connect** in the main window to start the selected profile. RustRadio sends the stereo program mix as 128 kbit/s MP3. The connection stays open during silence. RustRadio retries a dropped connection every five seconds until you cancel. The stream timer starts when Icecast audio is sent or SHOUTcast accepts the source login.
 
 Under **Stream metadata**, choose **Off**, **Track tags** (artist and title, with the filename as a fallback), or **Custom tag** (fixed text). Reconnect to apply changes to an active profile. For SHOUTcast, set the HTTP admin port if it differs from the source port minus one. Enter an admin password if the source password cannot update titles.
 

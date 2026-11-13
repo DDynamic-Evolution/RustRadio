@@ -32,6 +32,7 @@ pub struct Audio {
     stream_gain: Arc<AtomicU32>,
     local_gain: Arc<AtomicU32>,
     stream_peak: Arc<AtomicU32>,
+    limiter_peak: Arc<AtomicU32>,
     local_peak: Arc<AtomicU32>,
     mic_gain: Arc<AtomicU32>,
     mic_peak: Arc<AtomicU32>,
@@ -48,6 +49,7 @@ impl Audio {
         let stream_gain = tap.stream_gain.clone();
         let local_gain = tap.local_gain.clone();
         let stream_peak = tap.stream_peak.clone();
+        let limiter_peak = tap.limiter_peak.clone();
         let local_peak = tap.local_peak.clone();
         let mic_gain = tap.mic_gain.clone();
         let mic_peak = tap.mic_peak.clone();
@@ -67,6 +69,7 @@ impl Audio {
             stream_gain,
             local_gain,
             stream_peak,
+            limiter_peak,
             local_peak,
             mic_gain,
             mic_peak,
@@ -110,6 +113,10 @@ impl Audio {
 
     pub fn set_stream_gain(&self, gain: f32) {
         self.stream_gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn limiter_reduction(&self) -> f32 {
+        f32::from_bits(self.limiter_peak.load(Ordering::Relaxed))
     }
 
     pub fn stream_peak(&self) -> f32 {
@@ -218,6 +225,8 @@ fn program_mix() -> (mixer::Mixer, Tap) {
         stream_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         local_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         stream_peak: Arc::default(),
+        limiter_peak: Arc::default(),
+        block_reduction: 0.0,
         local_peak: Arc::default(),
         mic_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         mic_peak: Arc::default(),
@@ -242,6 +251,7 @@ struct Tap {
     stream_gain: Arc<AtomicU32>,
     local_gain: Arc<AtomicU32>,
     stream_peak: Arc<AtomicU32>,
+    limiter_peak: Arc<AtomicU32>,
     local_peak: Arc<AtomicU32>,
     mic_gain: Arc<AtomicU32>,
     mic_peak: Arc<AtomicU32>,
@@ -249,6 +259,7 @@ struct Tap {
     voice: f32,
     music_gain: f32,
     block_peak: f32,
+    block_reduction: f32,
     mic_block_peak: f32,
     mic_block_gain: f32,
     block_gain: f32,
@@ -280,12 +291,17 @@ impl Iterator for Tap {
         let music = self.eq.process(self.source.next()?, channel) * self.music_gain;
         let local = (music * self.local_block_gain).clamp(-1.0, 1.0);
         self.local_block_peak = self.local_block_peak.max(local.abs());
-        let program = ((music + self.voice) * self.block_gain).clamp(-1.0, 1.0);
+        let input = (music + self.voice) * self.block_gain;
+        let program = limit_sample(input);
+        if input.abs() > 0.8 {
+            self.block_reduction = self.block_reduction.max(1.0 - program.abs() / input.abs());
+        }
         self.block_peak = self.block_peak.max(program.abs());
         self.block[self.offset..self.offset + 4].copy_from_slice(&program.to_le_bytes());
         self.offset += 4;
         if self.offset == self.block.len() {
             publish_peak(&self.stream_peak, &mut self.block_peak);
+            publish_peak(&self.limiter_peak, &mut self.block_reduction);
             publish_peak(&self.local_peak, &mut self.local_block_peak);
             publish_peak(&self.mic_peak, &mut self.mic_block_peak);
             if let Ok(mut feed) = self.feed.try_lock() {
@@ -297,6 +313,17 @@ impl Iterator for Tap {
             self.offset = 0;
         }
         Some(local)
+    }
+}
+
+fn limit_sample(input: f32) -> f32 {
+    const KNEE: f32 = 0.8;
+    const HEADROOM: f32 = 0.18;
+    let excess = input.abs() - KNEE;
+    if excess > 0.0 {
+        (KNEE + HEADROOM * (1.0 - HEADROOM / (HEADROOM + excess))).copysign(input)
+    } else {
+        input
     }
 }
 
@@ -329,6 +356,15 @@ impl Source for Tap {
 mod tests {
     use super::*;
     use rodio::buffer::SamplesBuffer;
+
+    #[test]
+    fn stream_limiter_preserves_quiet_samples_and_bounds_loud_peaks() {
+        assert_eq!(limit_sample(0.75), 0.75);
+        assert_eq!(limit_sample(0.8), 0.8);
+        let limited = limit_sample(2.0);
+        assert!(limited > 0.8 && limited < 0.98);
+        assert_eq!(limit_sample(-2.0), -limited);
+    }
 
     #[test]
     fn microphone_ducks_music_and_reaches_only_the_stream() {

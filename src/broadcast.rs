@@ -270,11 +270,22 @@ impl Settings {
 }
 
 pub fn mp3_encoder() -> Command {
+    encoder(false)
+}
+
+fn mp3_encoder_with_progress() -> Command {
+    encoder(true)
+}
+
+fn encoder(progress: bool) -> Command {
     let mut command = Command::new("ffmpeg");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
+    }
+    if progress {
+        command.args(["-progress", "pipe:1", "-stats_period", "0.25"]);
     }
     command
         .args([
@@ -312,7 +323,7 @@ pub struct Broadcast {
     started_at: std::time::Instant,
     reports: Receiver<Result<(), String>>,
     ready: bool,
-    waiting_for_shoutcast: bool,
+
     tls: bool,
     pub name: String,
     metadata: MetadataUpdates,
@@ -322,6 +333,9 @@ impl Broadcast {
     pub fn start(settings: &Settings) -> Result<(Self, SyncSender<Pcm>), String> {
         settings.validate()?;
         let mut command = mp3_encoder();
+        if settings.protocol == Protocol::Icecast {
+            command = mp3_encoder_with_progress();
+        }
         let authority = settings.authority();
         if settings.protocol == Protocol::Icecast {
             let user = &settings.user;
@@ -338,7 +352,7 @@ impl Broadcast {
                 command.args(["-tls", "1", "-tls_verify", "1"]);
             }
             command.arg(format!("icecast://{user}@{authority}{}", settings.mount));
-            command.stdout(Stdio::null());
+            command.stdout(Stdio::piped());
         } else {
             command.arg("pipe:1").stdout(Stdio::piped());
         }
@@ -358,8 +372,23 @@ impl Broadcast {
             }
         });
 
-        let ready = false;
-        if let Some(mut stdout) = child.stdout.take() {
+        let mut stdout = child.stdout.take().expect("piped encoder output");
+        if settings.protocol == Protocol::Icecast {
+            thread::spawn(move || {
+                let mut reported = false;
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if !reported
+                        && line
+                            .strip_prefix("out_time_us=")
+                            .and_then(|value| value.parse::<i64>().ok())
+                            .is_some_and(|time| time > 0)
+                    {
+                        let _ = reports_tx.send(Ok(()));
+                        reported = true;
+                    }
+                }
+            });
+        } else {
             let password = settings.password.clone();
             let tls_host = settings
                 .tls
@@ -381,8 +410,8 @@ impl Broadcast {
                 child,
                 started_at: std::time::Instant::now(),
                 reports,
-                ready,
-                waiting_for_shoutcast: settings.protocol == Protocol::Shoutcast,
+                ready: false,
+
                 tls: settings.tls,
                 name: settings.label().to_owned(),
                 metadata: MetadataUpdates::new(settings.clone()),
@@ -398,6 +427,9 @@ impl Broadcast {
             self.started_at = std::time::Instant::now();
         }
         match self.child.try_wait() {
+            Ok(None) if !self.ready && self.started_at.elapsed() >= Duration::from_secs(15) => {
+                Err("Stream connection timed out.".into())
+            }
             Ok(None) => Ok(()),
             Ok(Some(status)) => Err(format!(
                 "FFmpeg exited ({status}). Check the server settings and libmp3lame."
@@ -407,7 +439,9 @@ impl Broadcast {
     }
 
     pub fn update_title(&mut self, path: Option<&std::path::Path>) {
-        self.metadata.update(path);
+        if self.ready {
+            self.metadata.update(path);
+        }
     }
 
     pub fn metadata_error(&self) -> Option<&str> {
@@ -415,16 +449,14 @@ impl Broadcast {
     }
 
     pub fn uptime(&self) -> Option<Duration> {
-        // Icecast is managed by FFmpeg. Its connection handshake is not reported here.
-        (!self.waiting_for_shoutcast || self.ready).then(|| self.started_at.elapsed())
+        self.ready.then(|| self.started_at.elapsed())
     }
 
     pub fn status(&self) -> &str {
         match (self.ready, self.tls) {
-            (true, true) => "Connected to SHOUTcast over TLS",
-            (true, false) => "Connected to SHOUTcast",
-            (false, true) => "Encoder running · TLS enabled",
-            (false, false) => "Encoder running",
+            (true, true) => "On air · TLS",
+            (true, false) => "On air",
+            (false, _) => "Connecting",
         }
     }
 }
@@ -730,19 +762,22 @@ mod tests {
             assert_eq!(audio[0], 0xff);
             assert_eq!(audio[1] & 0xe0, 0xe0);
             received_tx.send(()).unwrap();
+            let _ = io::copy(&mut reader, &mut io::sink());
         });
         let (mut broadcast, input) = Broadcast::start(&settings).unwrap();
+        assert!(broadcast.uptime().is_none());
         let mut received = false;
         for _ in 0..250 {
-            if received_rx.try_recv().is_ok() {
-                received = true;
+            received |= received_rx.try_recv().is_ok();
+            broadcast.poll().unwrap();
+            if received && broadcast.uptime().is_some() {
                 break;
             }
-            broadcast.poll().unwrap();
             let _ = input.try_send([0; BLOCK_SAMPLES * 4]);
             thread::sleep(Duration::from_millis(20));
         }
         assert!(received, "no MP3 data received within 5 seconds");
+        assert!(broadcast.uptime().is_some(), "stream never went on air");
         drop(broadcast);
         server.join().unwrap();
     }
