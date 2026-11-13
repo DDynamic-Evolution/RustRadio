@@ -82,7 +82,7 @@ struct Radio {
     recording_dir: Option<PathBuf>,
     recording: Option<recording::Recording>,
     last_recording: Option<PathBuf>,
-    volume: f32,
+    local_volume: f32,
     stream_gain: f32,
     mic_gain: f32,
     error: Option<String>,
@@ -100,7 +100,7 @@ impl Radio {
             playlist: storage
                 .and_then(|storage| eframe::get_value(storage, PLAYLIST_KEY))
                 .unwrap_or_default(),
-            volume: storage
+            local_volume: storage
                 .and_then(|storage| eframe::get_value::<f32>(storage, VOLUME_KEY))
                 .filter(|value| value.is_finite())
                 .unwrap_or(0.8)
@@ -159,6 +159,7 @@ impl Radio {
             let audio = Audio::open(self.output_device.as_ref())?;
             audio.set_eq(self.eq_gains);
             audio.set_stream_gain(self.stream_gain);
+            audio.set_local_gain(self.local_volume);
             audio.set_mic_gain(self.mic_gain);
             self.audio = Some(audio);
         }
@@ -166,7 +167,7 @@ impl Radio {
     }
 
     fn start_path(&mut self, path: &std::path::Path, overlap: Duration) -> Result<(), String> {
-        let gain = if overlap.is_zero() { self.volume } else { 0.0 };
+        let gain = if overlap.is_zero() { 1.0 } else { 0.0 };
         let next = self.audio()?.deck(path, gain)?;
         self.fade = self
             .deck
@@ -266,17 +267,16 @@ impl Radio {
             let Some(path) = self.pending_clips.pop_front() else {
                 break;
             };
-            let gain = self.volume;
+            let gain = 1.0;
             match self.audio().and_then(|audio| audio.deck(&path, gain)) {
                 Ok(clip) => self.scheduled_clip = Some(clip),
                 Err(error) => self.error = Some(error),
             }
         }
-        let music_volume = if let Some(clip) = &self.scheduled_clip {
-            clip.player.set_volume(self.volume);
-            self.volume * audio::DUCK_GAIN
+        let music_volume = if self.scheduled_clip.is_some() {
+            audio::DUCK_GAIN
         } else {
-            self.volume
+            1.0
         };
 
         let ended = self.deck.as_ref().is_none_or(|deck| deck.player.empty());
@@ -450,6 +450,29 @@ impl Radio {
             });
     }
 
+    fn local_level_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            let mut percent = self.local_volume * 100.0;
+            if ui
+                .add(
+                    egui::Slider::new(&mut percent, 0.0..=100.0)
+                        .integer()
+                        .suffix("%")
+                        .text("Local volume"),
+                )
+                .changed()
+            {
+                self.local_volume = percent / 100.0;
+                if let Some(audio) = &self.audio {
+                    audio.set_local_gain(self.local_volume);
+                }
+            }
+
+            let peak = self.audio.as_ref().map_or(0.0, Audio::local_peak);
+            peak_meter(ui, "Local peak", peak);
+        });
+    }
+
     fn stream_level_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let mut percent = self.stream_gain * 100.0;
@@ -522,7 +545,6 @@ impl Radio {
                 ui.separator();
                 match self.settings_tab {
                     SettingsTab::Audio => {
-                        ui.add(egui::Slider::new(&mut self.volume, 0.0..=1.0).text("Volume"));
                         ui.separator();
                         self.devices_ui(ui);
                     }
@@ -846,7 +868,7 @@ impl Radio {
 
     fn play_jingle(&mut self, index: usize) {
         let path = self.jingles[index].clone();
-        let gain = self.volume;
+        let gain = 1.0;
         match self.audio().and_then(|audio| audio.deck(&path, gain)) {
             Ok(deck) => self.jingle = Some((index, deck)),
             Err(error) => self.error = Some(error),
@@ -980,7 +1002,7 @@ impl eframe::App for Radio {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, PLAYLIST_KEY, &self.playlist);
         eframe::set_value(storage, "jingles", &self.jingles);
-        eframe::set_value(storage, VOLUME_KEY, &self.volume);
+        eframe::set_value(storage, VOLUME_KEY, &self.local_volume);
         eframe::set_value(storage, "stream_gain", &self.stream_gain);
         eframe::set_value(storage, "recording_dir", &self.recording_dir);
         eframe::set_value(storage, "mic_gain", &self.mic_gain);
@@ -1015,7 +1037,6 @@ impl eframe::App for Radio {
             if clip.player.empty() {
                 self.jingle = None;
             } else {
-                clip.player.set_volume(self.volume);
                 context.request_repaint_after(Duration::from_millis(50));
             }
         }
@@ -1176,6 +1197,7 @@ impl eframe::App for Radio {
             });
 
             self.microphone_level_ui(ui);
+            self.local_level_ui(ui);
             self.stream_level_ui(ui);
 
             self.playback_display(ui);

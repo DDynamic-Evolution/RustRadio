@@ -30,7 +30,9 @@ pub struct Audio {
     mic: Arc<Mutex<Option<microphone::Input>>>,
     gains: Arc<Mutex<[f32; BANDS.len()]>>,
     stream_gain: Arc<AtomicU32>,
+    local_gain: Arc<AtomicU32>,
     stream_peak: Arc<AtomicU32>,
+    local_peak: Arc<AtomicU32>,
     mic_gain: Arc<AtomicU32>,
     mic_peak: Arc<AtomicU32>,
 }
@@ -44,7 +46,9 @@ impl Audio {
         let mic = tap.mic.clone();
         let gains = tap.gains.clone();
         let stream_gain = tap.stream_gain.clone();
+        let local_gain = tap.local_gain.clone();
         let stream_peak = tap.stream_peak.clone();
+        let local_peak = tap.local_peak.clone();
         let mic_gain = tap.mic_gain.clone();
         let mic_peak = tap.mic_peak.clone();
         let render = Arc::new(Mutex::new((0, tap)));
@@ -61,7 +65,9 @@ impl Audio {
             mic,
             gains,
             stream_gain,
+            local_gain,
             stream_peak,
+            local_peak,
             mic_gain,
             mic_peak,
         })
@@ -108,6 +114,14 @@ impl Audio {
 
     pub fn stream_peak(&self) -> f32 {
         f32::from_bits(self.stream_peak.load(Ordering::Relaxed))
+    }
+
+    pub fn set_local_gain(&self, gain: f32) {
+        self.local_gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn local_peak(&self) -> f32 {
+        f32::from_bits(self.local_peak.load(Ordering::Relaxed))
     }
 
     pub fn set_feed(&self, sender: Option<SyncSender<Pcm>>) {
@@ -198,13 +212,17 @@ fn program_mix() -> (mixer::Mixer, Tap) {
         voice: 0.0,
         music_gain: 1.0,
         stream_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+        local_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         stream_peak: Arc::default(),
+        local_peak: Arc::default(),
         mic_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
         mic_peak: Arc::default(),
         mic_block_peak: 0.0,
         mic_block_gain: 1.0,
         block_peak: 0.0,
         block_gain: 1.0,
+        local_block_gain: 1.0,
+        local_block_peak: 0.0,
     };
     (mixer, tap)
 }
@@ -218,7 +236,9 @@ struct Tap {
     mic: Arc<Mutex<Option<microphone::Input>>>,
     gains: Arc<Mutex<[f32; BANDS.len()]>>,
     stream_gain: Arc<AtomicU32>,
+    local_gain: Arc<AtomicU32>,
     stream_peak: Arc<AtomicU32>,
+    local_peak: Arc<AtomicU32>,
     mic_gain: Arc<AtomicU32>,
     mic_peak: Arc<AtomicU32>,
     eq: Equalizer,
@@ -228,6 +248,8 @@ struct Tap {
     mic_block_peak: f32,
     mic_block_gain: f32,
     block_gain: f32,
+    local_block_gain: f32,
+    local_block_peak: f32,
 }
 
 impl Iterator for Tap {
@@ -236,6 +258,7 @@ impl Iterator for Tap {
     fn next(&mut self) -> Option<f32> {
         if self.offset == 0 {
             self.mic_block_gain = f32::from_bits(self.mic_gain.load(Ordering::Relaxed));
+            self.local_block_gain = f32::from_bits(self.local_gain.load(Ordering::Relaxed));
             self.block_gain = f32::from_bits(self.stream_gain.load(Ordering::Relaxed));
             if let Ok(gains) = self.gains.try_lock() {
                 self.eq.configure(*gains);
@@ -251,12 +274,15 @@ impl Iterator for Tap {
             self.mic_block_peak = self.mic_block_peak.max(self.voice.abs());
         }
         let music = self.eq.process(self.source.next()?, channel) * self.music_gain;
+        let local = (music * self.local_block_gain).clamp(-1.0, 1.0);
+        self.local_block_peak = self.local_block_peak.max(local.abs());
         let program = ((music + self.voice) * self.block_gain).clamp(-1.0, 1.0);
         self.block_peak = self.block_peak.max(program.abs());
         self.block[self.offset..self.offset + 4].copy_from_slice(&program.to_le_bytes());
         self.offset += 4;
         if self.offset == self.block.len() {
             publish_peak(&self.stream_peak, &mut self.block_peak);
+            publish_peak(&self.local_peak, &mut self.local_block_peak);
             publish_peak(&self.mic_peak, &mut self.mic_block_peak);
             if let Ok(mut feed) = self.feed.try_lock() {
                 broadcast::send_pcm(&mut feed, self.block);
@@ -266,7 +292,7 @@ impl Iterator for Tap {
             }
             self.offset = 0;
         }
-        Some(music.clamp(-1.0, 1.0))
+        Some(local)
     }
 }
 
@@ -334,6 +360,7 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::sync_channel(2);
         *tap.feed.lock().unwrap() = Some(sender);
         tap.stream_gain.store(0.5_f32.to_bits(), Ordering::Relaxed);
+        tap.local_gain.store(0.25_f32.to_bits(), Ordering::Relaxed);
 
         for gain in [0.25, 0.5] {
             mixer.add(SamplesBuffer::new(
@@ -345,7 +372,7 @@ mod tests {
         assert!(
             tap.by_ref()
                 .take(BLOCK_SAMPLES)
-                .all(|sample| sample == 0.75)
+                .all(|sample| sample == 0.1875)
         );
         let block = receiver.try_recv().unwrap();
         assert!(
@@ -356,6 +383,10 @@ mod tests {
         assert_eq!(
             f32::from_bits(tap.stream_peak.load(Ordering::Relaxed)),
             0.375
+        );
+        assert_eq!(
+            f32::from_bits(tap.local_peak.load(Ordering::Relaxed)),
+            0.1875
         );
         assert_eq!(tap.next(), Some(0.0));
     }

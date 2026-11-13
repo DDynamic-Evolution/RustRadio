@@ -4,11 +4,13 @@ RustRadio is a desktop radio automation and streaming app written in Rust for Wi
 
 ## Download for Windows x64
 
-1. Download the [portable ZIP](https://github.com/DDynamic-Evolution/RustRadio/releases/download/v0.2.0/RustRadio-v0.2.0-windows-x64-portable.zip) from [release v0.2.0](https://github.com/DDynamic-Evolution/RustRadio/releases/tag/v0.2.0).
+1. Download the [portable ZIP](https://github.com/DDynamic-Evolution/RustRadio/releases/download/v0.2.1/RustRadio-v0.2.1-windows-x64-portable.zip) from [release v0.2.1](https://github.com/DDynamic-Evolution/RustRadio/releases/tag/v0.2.1).
 2. Extract the entire archive.
 3. Double-click **Start RustRadio.cmd**. Keep the `ffmpeg` folder next to the launcher.
 
 The portable package includes FFmpeg for streaming and MP3 recording. You can run it without Rust, Cargo, or a separate FFmpeg installation. The release also offers a standalone EXE that looks for FFmpeg in `PATH`.
+
+See [CHANGELOG.md](CHANGELOG.md) for release changes.
 
 ## Build from source
 
@@ -45,7 +47,7 @@ Use **Settings → Audio** to choose the microphone and playback device. Select 
 
 **Settings → Equalizer** applies five bands from 80 Hz to 12 kHz to the music in both the stream and local output. Each band has a ±12 dB range. EQ settings are saved automatically.
 
-**Stream volume** controls the final mix, including the microphone. **Stream peak** measures the signal before encoding and works before connecting to a server.
+**Local volume** adjusts playback on the selected output device. **Local peak** shows the signal after that control. **Stream volume** controls the final mix for streaming and recording, including the microphone. **Stream peak** measures the signal before encoding and works before connecting to a server.
 
 ## Streaming
 
